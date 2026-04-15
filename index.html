@@ -1,0 +1,466 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Lucky - 交易复盘工具</title>
+    <link rel="icon" type="image/png" href="assets/icons/favicon.png">
+    <link rel="stylesheet" href="css/style.css">
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.39.0/dist/umd/supabase.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
+</head>
+<body>
+    <!-- 登录/注册模态框 -->
+    <div id="auth-modal" class="auth-modal">
+        <div class="auth-container">
+            <div class="auth-logo">
+                <span class="logo-cat">🐱</span>
+                <h1>Lucky</h1>
+                <p>专业交易复盘工具</p>
+            </div>
+            <div class="auth-tabs">
+                <button class="auth-tab active" data-tab="login">登录</button>
+                <button class="auth-tab" data-tab="register">注册</button>
+            </div>
+            <form id="login-form" class="auth-form">
+                <input type="email" name="email" placeholder="邮箱" required>
+                <input type="password" name="password" placeholder="密码" required>
+                <button type="submit" class="btn-primary">登录</button>
+            </form>
+            <form id="register-form" class="auth-form hidden">
+                <input type="email" name="email" placeholder="邮箱" required>
+                <input type="password" name="password" placeholder="密码（至少6位）" required>
+                <input type="text" name="nickname" placeholder="昵称" required>
+                <button type="submit" class="btn-primary">注册</button>
+            </form>
+            <button id="skip-auth" class="btn-skip">跳过登录，先体验</button>
+        </div>
+    </div>
+
+    <!-- 主应用界面 -->
+    <div id="app" class="app hidden">
+        <!-- 顶部导航栏 -->
+        <nav class="navbar">
+            <div class="nav-brand">
+                <img src="assets/icons/favicon.png" alt="Lucky" class="nav-logo">
+                <span>Lucky</span>
+            </div>
+            <div class="nav-user">
+                <span id="user-name">访客</span>
+                <button id="logout-btn" class="btn-small hidden">退出</button>
+            </div>
+        </nav>
+
+        <!-- 页面内容区域 -->
+        <main class="main-content">
+            <!-- 仪表盘 -->
+            <section id="page-dashboard" class="page active">
+                <div class="page-header">
+                    <h2>仪表盘</h2>
+                    <p class="date-display"></p>
+                </div>
+                <div class="dashboard-grid">
+                    <!-- 今日打卡卡片 -->
+                    <div class="card checkin-card">
+                        <h3>今日纪律打卡</h3>
+                        <p class="checkin-streak">连续执行 <span id="streak-days">0</span> 天</p>
+                        <div class="checkin-actions">
+                            <button id="checkin-yes" class="btn-checkin success">
+                                <span>✓</span> 按计划执行
+                            </button>
+                            <button id="checkin-no" class="btn-checkin danger">
+                                <span>✗</span> 未按计划
+                            </button>
+                        </div>
+                        <p class="checkin-status" id="checkin-status">还未打卡</p>
+                    </div>
+
+                    <!-- 本周盈亏概览 -->
+                    <div class="card summary-card">
+                        <h3>本周概览</h3>
+                        <div class="stat-row">
+                            <div class="stat-item">
+                                <span class="stat-label">交易次数</span>
+                                <span class="stat-value" id="week-trades">0</span>
+                            </div>
+                            <div class="stat-item">
+                                <span class="stat-label">胜率</span>
+                                <span class="stat-value" id="week-winrate">0%</span>
+                            </div>
+                        </div>
+                        <div class="stat-row">
+                            <div class="stat-item">
+                                <span class="stat-label">总盈亏</span>
+                                <span class="stat-value" id="week-pnl">¥0</span>
+                            </div>
+                            <div class="stat-item">
+                                <span class="stat-label">净盈亏</span>
+                                <span class="stat-value" id="week-net-pnl">¥0</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- 资金曲线缩略图 -->
+                    <div class="card chart-card">
+                        <h3>资金曲线</h3>
+                        <div class="chart-container small">
+                            <canvas id="dashboard-chart"></canvas>
+                        </div>
+                        <a href="#" class="view-full" data-page="curve">查看完整曲线 →</a>
+                    </div>
+
+                    <!-- 快捷操作 -->
+                    <div class="card quick-actions">
+                        <h3>快捷操作</h3>
+                        <button class="btn-action" data-page="record">
+                            <span class="action-icon">📝</span>
+                            <span>新建交易记录</span>
+                        </button>
+                        <button class="btn-action" data-page="list">
+                            <span class="action-icon">📋</span>
+                            <span>查看复盘列表</span>
+                        </button>
+                        <button class="btn-action" data-page="report">
+                            <span class="action-icon">📊</span>
+                            <span>生成报告</span>
+                        </button>
+                    </div>
+                </div>
+            </section>
+
+            <!-- 记录交易 -->
+            <section id="page-record" class="page">
+                <div class="page-header">
+                    <h2>记录交易</h2>
+                    <p>记录每一笔交易，持续复盘进步</p>
+                </div>
+                <div class="record-container">
+                    <!-- 交易前检查清单 -->
+                    <div class="card checklist-card">
+                        <h3>交易前检查清单</h3>
+                        <p class="checklist-subtitle">逐项确认，培养纪律</p>
+                        <div id="checklist-items" class="checklist-items">
+                            <!-- 动态生成检查项 -->
+                        </div>
+                        <p class="checklist-hint">* 未全部确认也可提交，但会标记为未完成检查</p>
+                    </div>
+
+                    <!-- 交易信息表单 -->
+                    <form id="trade-form" class="card trade-form">
+                        <h3>交易详情</h3>
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label>日期</label>
+                                <input type="date" name="date" required>
+                            </div>
+                            <div class="form-group">
+                                <label>交易品种</label>
+                                <input type="text" name="symbol" placeholder="如: BTC, AAPL" required>
+                            </div>
+                        </div>
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label>方向</label>
+                                <select name="direction" required>
+                                    <option value="long">做多</option>
+                                    <option value="short">做空</option>
+                                </select>
+                            </div>
+                            <div class="form-group">
+                                <label>仓位大小</label>
+                                <input type="number" name="position_size" placeholder="手数/数量" required>
+                            </div>
+                        </div>
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label>开仓价</label>
+                                <input type="number" name="entry_price" step="0.01" required>
+                            </div>
+                            <div class="form-group">
+                                <label>平仓价</label>
+                                <input type="number" name="exit_price" step="0.01" required>
+                            </div>
+                        </div>
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label>盈亏金额</label>
+                                <input type="number" name="pnl" step="0.01" placeholder="正数盈利，负数亏损" required>
+                            </div>
+                            <div class="form-group">
+                                <label>K线截图</label>
+                                <input type="file" name="screenshot" accept="image/*">
+                            </div>
+                        </div>
+
+                        <!-- 情绪选择 -->
+                        <div class="form-group emotion-group">
+                            <label>交易情绪</label>
+                            <div id="emotion-selector" class="emotion-selector">
+                                <!-- 动态生成情绪选项 -->
+                            </div>
+                        </div>
+
+                        <!-- 标签选择 -->
+                        <div class="form-group tags-group">
+                            <label>交易标签</label>
+                            <div id="tags-selector" class="tags-selector">
+                                <!-- 动态生成标签选项 -->
+                            </div>
+                        </div>
+
+                        <!-- 复盘笔记 -->
+                        <div class="form-group notes-group">
+                            <label>复盘笔记</label>
+                            <div class="voice-input-wrapper">
+                                <textarea name="notes" rows="4" placeholder="记录这次交易的思考..."></textarea>
+                                <button type="button" id="voice-btn" class="voice-btn" title="语音输入">
+                                    🎤
+                                </button>
+                            </div>
+                            <p id="voice-status" class="voice-status"></p>
+                        </div>
+
+                        <div class="form-actions">
+                            <button type="submit" class="btn-primary">保存记录</button>
+                            <button type="reset" class="btn-secondary">重置</button>
+                        </div>
+                    </form>
+                </div>
+            </section>
+
+            <!-- 复盘列表 -->
+            <section id="page-list" class="page">
+                <div class="page-header">
+                    <h2>复盘列表</h2>
+                    <div class="filter-bar">
+                        <input type="date" id="filter-date-start" placeholder="开始日期">
+                        <input type="date" id="filter-date-end" placeholder="结束日期">
+                        <select id="filter-symbol">
+                            <option value="">所有品种</option>
+                        </select>
+                        <button id="filter-btn" class="btn-small">筛选</button>
+                        <button id="clear-filter-btn" class="btn-small btn-secondary">清除</button>
+                    </div>
+                </div>
+                <div id="trades-list" class="trades-list">
+                    <!-- 动态生成交易列表 -->
+                </div>
+            </section>
+
+            <!-- 分析 -->
+            <section id="page-analysis" class="page">
+                <div class="page-header">
+                    <h2>交易分析</h2>
+                    <p>数据驱动，洞察交易模式</p>
+                </div>
+                <div class="analysis-grid">
+                    <!-- 标签统计 -->
+                    <div class="card">
+                        <h3>标签统计</h3>
+                        <div id="tags-analysis" class="analysis-content">
+                            <!-- 动态生成 -->
+                        </div>
+                    </div>
+
+                    <!-- 情绪-胜率关联 -->
+                    <div class="card">
+                        <h3>情绪与胜率</h3>
+                        <div id="emotion-analysis" class="analysis-content">
+                            <!-- 动态生成 -->
+                        </div>
+                    </div>
+
+                    <!-- 亏损模式识别 -->
+                    <div class="card pattern-card">
+                        <h3>亏损模式识别</h3>
+                        <div id="pattern-analysis" class="analysis-content">
+                            <p class="pattern-placeholder">数据积累中，至少需要20笔交易才能分析</p>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- 报告 -->
+            <section id="page-report" class="page">
+                <div class="page-header">
+                    <h2>交易报告</h2>
+                    <div class="report-tabs">
+                        <button class="report-tab active" data-report="weekly">周报</button>
+                        <button class="report-tab" data-report="monthly">月报</button>
+                    </div>
+                </div>
+                <div id="report-content" class="report-container">
+                    <!-- 动态生成报告 -->
+                </div>
+            </section>
+
+            <!-- 资金曲线 -->
+            <section id="page-curve" class="page">
+                <div class="page-header">
+                    <h2>资金曲线</h2>
+                    <div class="time-range-selector">
+                        <button class="range-btn active" data-range="7">近7天</button>
+                        <button class="range-btn" data-range="30">近30天</button>
+                        <button class="range-btn" data-range="90">近90天</button>
+                        <button class="range-btn" data-range="all">全部</button>
+                    </div>
+                </div>
+                <div class="card chart-card-large">
+                    <div class="chart-container large">
+                        <canvas id="equity-curve-chart"></canvas>
+                    </div>
+                    <div class="curve-stats">
+                        <div class="curve-stat">
+                            <span class="stat-label">初始资金</span>
+                            <span class="stat-value" id="initial-capital">¥0</span>
+                        </div>
+                        <div class="curve-stat">
+                            <span class="stat-label">当前资金</span>
+                            <span class="stat-value" id="current-capital">¥0</span>
+                        </div>
+                        <div class="curve-stat">
+                            <span class="stat-label">最大回撤</span>
+                            <span class="stat-value" id="max-drawdown">0%</span>
+                        </div>
+                        <div class="curve-stat">
+                            <span class="stat-label">总收益率</span>
+                            <span class="stat-value" id="total-return">0%</span>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- 设置 -->
+            <section id="page-settings" class="page">
+                <div class="page-header">
+                    <h2>设置</h2>
+                    <p>个性化配置和数据管理</p>
+                </div>
+                <div class="settings-grid">
+                    <!-- 账户信息 -->
+                    <div class="card settings-card">
+                        <h3>账户信息</h3>
+                        <div class="form-group">
+                            <label>昵称</label>
+                            <input type="text" id="setting-nickname" placeholder="设置昵称">
+                        </div>
+                        <div class="form-group">
+                            <label>初始资金</label>
+                            <input type="number" id="setting-capital" placeholder="设置初始资金">
+                        </div>
+                        <button id="save-profile" class="btn-primary">保存</button>
+                    </div>
+
+                    <!-- 自定义标签 -->
+                    <div class="card settings-card">
+                        <h3>自定义交易标签</h3>
+                        <div class="tags-editor">
+                            <div id="custom-tags-list" class="custom-tags-list">
+                                <!-- 动态生成 -->
+                            </div>
+                            <div class="add-tag-row">
+                                <input type="text" id="new-tag-input" placeholder="新标签名称">
+                                <button id="add-tag-btn" class="btn-small">添加</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- 自定义情绪 -->
+                    <div class="card settings-card">
+                        <h3>自定义情绪标签</h3>
+                        <div class="emotions-editor">
+                            <div id="custom-emotions-list" class="custom-emotions-list">
+                                <!-- 动态生成 -->
+                            </div>
+                            <div class="add-emotion-row">
+                                <input type="text" id="new-emotion-emoji" placeholder="Emoji" maxlength="2">
+                                <input type="text" id="new-emotion-name" placeholder="情绪名称">
+                                <button id="add-emotion-btn" class="btn-small">添加</button>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- 检查清单设置 -->
+                    <div class="card settings-card">
+                        <h3>交易前检查清单</h3>
+                        <div id="checklist-settings" class="checklist-settings">
+                            <!-- 动态生成 -->
+                        </div>
+                        <div class="add-checklist-row">
+                            <input type="text" id="new-checklist-input" placeholder="新检查项">
+                            <button id="add-checklist-btn" class="btn-small">添加</button>
+                        </div>
+                    </div>
+
+                    <!-- 数据管理 -->
+                    <div class="card settings-card">
+                        <h3>数据管理</h3>
+                        <div class="data-actions">
+                            <button id="export-data" class="btn-secondary">导出数据 (JSON)</button>
+                            <button id="import-data-btn" class="btn-secondary">导入数据</button>
+                            <input type="file" id="import-data-file" accept=".json" class="hidden">
+                        </div>
+                        <p class="data-hint">数据会同步到云端（登录后），也可手动备份</p>
+                    </div>
+
+                    <!-- 关于 -->
+                    <div class="card settings-card about-card">
+                        <h3>关于 Lucky</h3>
+                        <p>🐱 Lucky - 专业交易复盘工具</p>
+                        <p>版本: 1.0.0</p>
+                        <p>记录每一笔交易，复盘每一次成长</p>
+                    </div>
+                </div>
+            </section>
+        </main>
+
+        <!-- 底部导航 -->
+        <nav class="bottom-nav">
+            <a href="#" class="nav-item active" data-page="dashboard">
+                <img src="assets/icons/nav-dashboard.png" alt="仪表盘" class="nav-icon">
+                <span>首页</span>
+            </a>
+            <a href="#" class="nav-item" data-page="record">
+                <img src="assets/icons/nav-record.png" alt="记录" class="nav-icon">
+                <span>记录</span>
+            </a>
+            <a href="#" class="nav-item" data-page="list">
+                <img src="assets/icons/nav-list.png" alt="列表" class="nav-icon">
+                <span>列表</span>
+            </a>
+            <a href="#" class="nav-item" data-page="analysis">
+                <img src="assets/icons/nav-analysis.png" alt="分析" class="nav-icon">
+                <span>分析</span>
+            </a>
+            <a href="#" class="nav-item" data-page="report">
+                <img src="assets/icons/nav-report.png" alt="报告" class="nav-icon">
+                <span>报告</span>
+            </a>
+            <a href="#" class="nav-item" data-page="curve">
+                <img src="assets/icons/nav-curve.png" alt="曲线" class="nav-icon">
+                <span>曲线</span>
+            </a>
+            <a href="#" class="nav-item" data-page="settings">
+                <img src="assets/icons/nav-settings.png" alt="设置" class="nav-icon">
+                <span>设置</span>
+            </a>
+        </nav>
+    </div>
+
+    <!-- 截图预览模态框 -->
+    <div id="screenshot-modal" class="modal hidden">
+        <div class="modal-content">
+            <span class="modal-close">&times;</span>
+            <img id="screenshot-preview" src="" alt="交易截图">
+        </div>
+    </div>
+
+    <!-- Toast 提示 -->
+    <div id="toast" class="toast hidden">
+        <span id="toast-message"></span>
+    </div>
+
+    <script src="js/app.js"></script>
+</body>
+</html>
