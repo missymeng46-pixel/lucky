@@ -7,11 +7,23 @@
 // 注意：使用时请替换为你的 Supabase 项目 URL 和 Anon Key
 const SUPABASE_URL = 'https://mexgtooyjlcrnktnphsq.supabase.co';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im1leGd0b295amxjcm5rdG5waHNxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzYyMjkwMTgsImV4cCI6MjA5MTgwNTAxOH0.AjstjIR_9AvHYXeQCXGv9-ZyJFSve5HdJUu3rjmXrLE';
+const AUTH_TIMEOUT_MS = 8000;
+const CLOUD_HEALTH_TIMEOUT_MS = 3500;
+const LOCAL_ACCOUNTS_KEY = 'lucky_local_accounts';
+const LOCAL_SESSION_KEY = 'lucky_local_session';
 
 // 初始化 Supabase 客户端
 let supabase = null;
-if (SUPABASE_URL !== 'YOUR_SUPABASE_URL' && SUPABASE_ANON_KEY !== 'YOUR_SUPABASE_ANON_KEY') {
-    supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+try {
+    if (
+        window.supabase &&
+        SUPABASE_URL !== 'YOUR_SUPABASE_URL' &&
+        SUPABASE_ANON_KEY !== 'YOUR_SUPABASE_ANON_KEY'
+    ) {
+        supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+    }
+} catch (error) {
+    console.warn('Supabase client init failed:', error);
 }
 
 // ===== 全局状态 =====
@@ -30,7 +42,9 @@ const state = {
     selectedEmotion: null,
     selectedTags: new Set(),
     checklistCompleted: false,
-    voiceRecognition: null
+    voiceRecognition: null,
+    authMode: 'guest',
+    cloudAuthStatus: supabase ? 'unknown' : 'unavailable'
 };
 
 // ===== 预设数据 =====
@@ -93,6 +107,164 @@ function generateId() {
     return Date.now().toString(36) + Math.random().toString(36).substr(2);
 }
 
+function normalizeEmail(email) {
+    return String(email || '').trim().toLowerCase();
+}
+
+function shouldUseSupabase() {
+    return Boolean(supabase && state.authMode === 'supabase' && state.currentUser);
+}
+
+function withTimeout(promise, timeoutMs, timeoutMessage) {
+    let timeoutId;
+    const timeout = new Promise((_, reject) => {
+        timeoutId = setTimeout(() => reject(new Error(timeoutMessage)), timeoutMs);
+    });
+
+    return Promise.race([promise, timeout]).finally(() => clearTimeout(timeoutId));
+}
+
+async function checkSupabaseConnection() {
+    if (!supabase) {
+        state.cloudAuthStatus = 'unavailable';
+        return false;
+    }
+
+    if (state.cloudAuthStatus === 'available') return true;
+    if (state.cloudAuthStatus === 'unavailable') return false;
+
+    try {
+        const response = await withTimeout(
+            fetch(`${SUPABASE_URL}/auth/v1/settings`, {
+                headers: {
+                    apikey: SUPABASE_ANON_KEY,
+                    Authorization: `Bearer ${SUPABASE_ANON_KEY}`
+                },
+                cache: 'no-store'
+            }),
+            CLOUD_HEALTH_TIMEOUT_MS,
+            'Supabase 连接超时'
+        );
+
+        if (!response.ok) throw new Error(`Supabase 返回 ${response.status}`);
+
+        state.cloudAuthStatus = 'available';
+        return true;
+    } catch (error) {
+        console.warn('Supabase health check failed:', error);
+        state.cloudAuthStatus = 'unavailable';
+        return false;
+    }
+}
+
+function loadLocalAccounts() {
+    try {
+        return JSON.parse(localStorage.getItem(LOCAL_ACCOUNTS_KEY) || '[]');
+    } catch (error) {
+        console.warn('Load local accounts failed:', error);
+        return [];
+    }
+}
+
+function saveLocalAccounts(accounts) {
+    localStorage.setItem(LOCAL_ACCOUNTS_KEY, JSON.stringify(accounts));
+}
+
+function findLocalAccount(email) {
+    const normalizedEmail = normalizeEmail(email);
+    return loadLocalAccounts().find(account => account.email === normalizedEmail);
+}
+
+function createSalt() {
+    if (window.crypto?.getRandomValues) {
+        const bytes = new Uint8Array(16);
+        window.crypto.getRandomValues(bytes);
+        return Array.from(bytes).map(byte => byte.toString(16).padStart(2, '0')).join('');
+    }
+
+    return generateId();
+}
+
+async function hashPassword(password, salt) {
+    const source = `${salt}:${password}`;
+    if (window.crypto?.subtle && window.TextEncoder) {
+        const data = new TextEncoder().encode(source);
+        const hashBuffer = await window.crypto.subtle.digest('SHA-256', data);
+        return Array.from(new Uint8Array(hashBuffer))
+            .map(byte => byte.toString(16).padStart(2, '0'))
+            .join('');
+    }
+
+    return btoa(unescape(encodeURIComponent(source)));
+}
+
+async function createLocalAccount(email, password, nickname) {
+    const normalizedEmail = normalizeEmail(email);
+    const accounts = loadLocalAccounts();
+    const existingAccount = accounts.find(account => account.email === normalizedEmail);
+
+    if (existingAccount) {
+        return { account: existingAccount, created: false };
+    }
+
+    const salt = createSalt();
+    const account = {
+        id: `local_${generateId()}`,
+        email: normalizedEmail,
+        nickname: nickname || normalizedEmail.split('@')[0],
+        password_hash: await hashPassword(password, salt),
+        salt,
+        created_at: new Date().toISOString()
+    };
+
+    accounts.push(account);
+    saveLocalAccounts(accounts);
+    return { account, created: true };
+}
+
+async function verifyLocalAccount(email, password) {
+    const account = findLocalAccount(email);
+    if (!account) return null;
+
+    const passwordHash = await hashPassword(password, account.salt);
+    return passwordHash === account.password_hash ? account : null;
+}
+
+function saveLocalSession(account) {
+    localStorage.setItem(LOCAL_SESSION_KEY, account.id);
+}
+
+function loadLocalSession() {
+    const accountId = localStorage.getItem(LOCAL_SESSION_KEY);
+    if (!accountId) return null;
+    return loadLocalAccounts().find(account => account.id === accountId) || null;
+}
+
+function clearLocalSession() {
+    localStorage.removeItem(LOCAL_SESSION_KEY);
+}
+
+async function loginWithLocalAccount(email, password) {
+    const account = await verifyLocalAccount(email, password);
+    if (!account) return false;
+
+    await onLocalAuthSuccess(account, '登录成功');
+    return true;
+}
+
+async function onLocalAuthSuccess(account, message) {
+    state.currentUser = {
+        id: account.id,
+        email: account.email,
+        nickname: account.nickname
+    };
+    state.isAuthenticated = true;
+    state.authMode = 'local';
+    saveLocalSession(account);
+    await onAuthSuccess();
+    showToast(message);
+}
+
 // ===== 本地存储操作 =====
 function saveToLocalStorage() {
     const data = {
@@ -116,7 +288,7 @@ function loadFromLocalStorage() {
 
 // ===== Supabase 数据库操作 =====
 async function syncWithSupabase() {
-    if (!supabase || !state.isAuthenticated) return;
+    if (!shouldUseSupabase()) return;
 
     try {
         // 同步交易记录
@@ -152,7 +324,7 @@ async function syncWithSupabase() {
 }
 
 async function saveTradeToSupabase(trade) {
-    if (!supabase || !state.isAuthenticated) return;
+    if (!shouldUseSupabase()) return;
 
     try {
         const { error } = await supabase.from('trades').upsert({
@@ -166,7 +338,7 @@ async function saveTradeToSupabase(trade) {
 }
 
 async function deleteTradeFromSupabase(tradeId) {
-    if (!supabase || !state.isAuthenticated) return;
+    if (!shouldUseSupabase()) return;
 
     try {
         const { error } = await supabase.from('trades').delete().eq('id', tradeId);
@@ -177,7 +349,7 @@ async function deleteTradeFromSupabase(tradeId) {
 }
 
 async function saveCheckinToSupabase(checkin) {
-    if (!supabase || !state.isAuthenticated) return;
+    if (!shouldUseSupabase()) return;
 
     try {
         const { error } = await supabase.from('daily_checkin').upsert({
@@ -191,7 +363,7 @@ async function saveCheckinToSupabase(checkin) {
 }
 
 async function saveSettingsToSupabase() {
-    if (!supabase || !state.isAuthenticated) return;
+    if (!shouldUseSupabase()) return;
 
     try {
         const { error } = await supabase.from('user_settings').upsert({
@@ -232,56 +404,113 @@ async function initAuth() {
     // 登录
     loginForm.addEventListener('submit', async (e) => {
         e.preventDefault();
-        if (!supabase) {
-            showToast('Supabase 未配置，请先体验');
-            return;
-        }
 
         const formData = new FormData(loginForm);
-        const email = formData.get('email');
+        const email = normalizeEmail(formData.get('email'));
         const password = formData.get('password');
+        const submitBtn = loginForm.querySelector('button[type="submit"]');
+
+        submitBtn.disabled = true;
+        submitBtn.textContent = '登录中...';
 
         try {
-            const { data, error } = await supabase.auth.signInWithPassword({ email, password });
-            if (error) throw error;
+            const cloudAvailable = await checkSupabaseConnection();
 
-            state.currentUser = data.user;
-            state.isAuthenticated = true;
-            await onAuthSuccess();
+            if (cloudAvailable) {
+                const { data, error } = await withTimeout(
+                    supabase.auth.signInWithPassword({ email, password }),
+                    AUTH_TIMEOUT_MS,
+                    '云端登录超时'
+                );
+                if (error) throw error;
+
+                state.currentUser = data.user;
+                state.isAuthenticated = true;
+                state.authMode = 'supabase';
+                clearLocalSession();
+                await onAuthSuccess();
+                showToast('登录成功');
+                return;
+            }
+
+            if (await loginWithLocalAccount(email, password)) return;
+
+            showToast('云端暂时连不上，请先注册一个本地账号');
         } catch (error) {
+            console.warn('Cloud login failed:', error);
+            if (await loginWithLocalAccount(email, password)) return;
             showToast(`登录失败: ${error.message}`);
+        } finally {
+            submitBtn.disabled = false;
+            submitBtn.textContent = '登录';
         }
     });
 
     // 注册
     registerForm.addEventListener('submit', async (e) => {
         e.preventDefault();
-        if (!supabase) {
-            showToast('Supabase 未配置，请先体验');
-            return;
-        }
 
         const formData = new FormData(registerForm);
-        const email = formData.get('email');
+        const email = normalizeEmail(formData.get('email'));
         const password = formData.get('password');
-        const nickname = formData.get('nickname');
+        const nickname = formData.get('nickname').trim();
+        const submitBtn = registerForm.querySelector('button[type="submit"]');
+
+        submitBtn.disabled = true;
+        submitBtn.textContent = '注册中...';
 
         try {
-            const { data, error } = await supabase.auth.signUp({ email, password });
-            if (error) throw error;
+            const cloudAvailable = await checkSupabaseConnection();
 
-            // 创建用户资料
-            await supabase.from('users_profile').insert({
-                user_id: data.user.id,
-                nickname: nickname,
-                initial_capital: state.settings.initialCapital
-            });
+            if (cloudAvailable) {
+                const { data, error } = await withTimeout(
+                    supabase.auth.signUp({
+                        email,
+                        password,
+                        options: { data: { nickname } }
+                    }),
+                    AUTH_TIMEOUT_MS,
+                    '云端注册超时'
+                );
+                if (error) throw error;
 
-            state.currentUser = data.user;
-            state.isAuthenticated = true;
-            await onAuthSuccess();
+                const { account } = await createLocalAccount(email, password, nickname);
+
+                if (data.session && data.user) {
+                    await saveSupabaseProfile(data.user, nickname);
+                    state.currentUser = data.user;
+                    state.isAuthenticated = true;
+                    state.authMode = 'supabase';
+                    clearLocalSession();
+                    await onAuthSuccess();
+                    showToast('注册成功');
+                    return;
+                }
+
+                await onLocalAuthSuccess(account, '注册成功，已先启用本地账号');
+                return;
+            }
+
+            const { account, created } = await createLocalAccount(email, password, nickname);
+            if (!created) {
+                showToast('这个邮箱已在本机注册，请直接登录');
+                return;
+            }
+
+            await onLocalAuthSuccess(account, '注册成功');
         } catch (error) {
-            showToast(`注册失败: ${error.message}`);
+            console.warn('Cloud register failed:', error);
+            const existingAccount = findLocalAccount(email);
+            if (existingAccount) {
+                showToast('这个邮箱已在本机注册，请直接登录');
+                return;
+            }
+
+            const { account } = await createLocalAccount(email, password, nickname);
+            await onLocalAuthSuccess(account, '注册成功，已先启用本地账号');
+        } finally {
+            submitBtn.disabled = false;
+            submitBtn.textContent = '注册';
         }
     });
 
@@ -289,6 +518,8 @@ async function initAuth() {
     skipAuthBtn.addEventListener('click', () => {
         state.isAuthenticated = false;
         state.currentUser = null;
+        state.authMode = 'guest';
+        clearLocalSession();
         document.getElementById('user-name').textContent = '访客';
         document.getElementById('auth-modal').classList.add('hidden');
         document.getElementById('app').classList.remove('hidden');
@@ -297,22 +528,51 @@ async function initAuth() {
 
     // 退出登录
     logoutBtn.addEventListener('click', async () => {
-        if (supabase) {
+        if (shouldUseSupabase()) {
             await supabase.auth.signOut();
         }
+        clearLocalSession();
         state.isAuthenticated = false;
         state.currentUser = null;
+        state.authMode = 'guest';
         location.reload();
     });
 
     // 检查已有会话
     if (supabase) {
-        const { data: { session } } = await supabase.auth.getSession();
-        if (session) {
-            state.currentUser = session.user;
-            state.isAuthenticated = true;
-            await onAuthSuccess();
+        try {
+            const { data: { session } } = await supabase.auth.getSession();
+            if (session) {
+                state.currentUser = session.user;
+                state.isAuthenticated = true;
+                state.authMode = 'supabase';
+                clearLocalSession();
+                await onAuthSuccess();
+                return;
+            }
+        } catch (error) {
+            console.warn('Get Supabase session failed:', error);
         }
+    }
+
+    const localSession = loadLocalSession();
+    if (localSession) {
+        await onLocalAuthSuccess(localSession, '已登录');
+    }
+}
+
+async function saveSupabaseProfile(user, nickname) {
+    if (!supabase || !user) return;
+
+    try {
+        const { error } = await supabase.from('users_profile').upsert({
+            user_id: user.id,
+            nickname: nickname,
+            initial_capital: state.settings.initialCapital
+        });
+        if (error) throw error;
+    } catch (error) {
+        console.warn('Save Supabase profile failed:', error);
     }
 }
 
@@ -320,10 +580,10 @@ async function onAuthSuccess() {
     document.getElementById('auth-modal').classList.add('hidden');
     document.getElementById('app').classList.remove('hidden');
     document.getElementById('logout-btn').classList.remove('hidden');
-    document.getElementById('user-name').textContent = state.currentUser.email;
+    document.getElementById('user-name').textContent = state.currentUser.nickname || state.currentUser.email;
 
     // 加载用户设置
-    if (supabase) {
+    if (shouldUseSupabase()) {
         const { data: profile } = await supabase
             .from('users_profile')
             .select('*')
@@ -1410,7 +1670,7 @@ function drawEquityCurve(range) {
 // ===== 设置页面 =====
 function renderSettings() {
     // 账户信息
-    document.getElementById('setting-nickname').value = state.currentUser?.email?.split('@')[0] || '';
+    document.getElementById('setting-nickname').value = state.currentUser?.nickname || state.currentUser?.email?.split('@')[0] || '';
     document.getElementById('setting-capital').value = state.settings.initialCapital;
 
     // 自定义标签
@@ -1460,8 +1720,23 @@ function renderChecklistSettings() {
 function initSettings() {
     // 保存账户信息
     document.getElementById('save-profile').addEventListener('click', async () => {
+        const nickname = document.getElementById('setting-nickname').value.trim();
+        if (state.authMode === 'local' && state.currentUser) {
+            const accounts = loadLocalAccounts();
+            const account = accounts.find(item => item.id === state.currentUser.id);
+            if (account) {
+                account.nickname = nickname || account.nickname;
+                state.currentUser.nickname = account.nickname;
+                document.getElementById('user-name').textContent = account.nickname;
+                saveLocalAccounts(accounts);
+            }
+        }
+
         state.settings.initialCapital = parseFloat(document.getElementById('setting-capital').value) || 100000;
         saveToLocalStorage();
+        if (shouldUseSupabase() && nickname) {
+            await saveSupabaseProfile(state.currentUser, nickname);
+        }
         await saveSettingsToSupabase();
         showToast('设置已保存');
     });
